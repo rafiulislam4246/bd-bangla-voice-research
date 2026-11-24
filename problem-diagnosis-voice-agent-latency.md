@@ -149,51 +149,119 @@ Benchmark both on YOUR Bangla banking scripts - published scores don't capture b
 
 ## Q3 UPDATED (section 6b: can F5-TTS reduce TTFA?)
 
-**Their team is RIGHT on architecture, WRONG on version.**
+**Their team is 100% RIGHT on the architectural claim. IndicF5 / F5-TTS CANNOT stream sub-generation audio. Ever. It is structurally impossible.**
 
-### Version claim check
-- They cite `f5_tts 0.1.0` - **this version does NOT exist on PyPI**
-- Earliest PyPI release: `0.3.4` (Jan 2025)
-- Latest PyPI: `1.1.22` (Jul 2026)
-- Their quoted `socket_server.py` code matches a **pre-Feb-2025 snapshot**, not current
-- Streaming support shipped in **PyPI 0.6.2 (2025-02-26)** and solid in **1.0.0 (2025-03-12)**
+### Why - verified
+- F5-TTS is flow matching
+- Flow matching generates the whole waveform per NFE pass as one ODE solve
+- No partial output exists mid-generation - you cannot peek inside the ODE
+- `f5_tts/infer/utils_infer.py` has a `streaming=True` option BUT it chunks at TEXT-BATCH boundary, not sub-generation
+- Even with `streaming=True`, each batch's full generation completes before ANY of its audio yields
 
-**Fix**: upgrade `f5_tts` to 1.1.22. Current signature:
-```python
-def infer_batch_process(..., streaming=False, chunk_size=2048, ...)
+### Version note (minor, but fix it)
+- They cite `f5_tts 0.1.0` - this version does NOT exist on PyPI
+- Earliest PyPI: `0.3.4` (Jan 2025). Latest: `1.1.22` (Jul 2026)
+- Their quoted `socket_server.py` code matches pre-Feb-2025 snapshot
+- Upgrade to `1.1.22` is worth doing for other fixes, but it does NOT give sub-generation streaming - that feature doesn't exist in any version
+
+### The ONLY way to reduce first-audio with IndicF5: text-chunking workaround (NOT streaming)
+
+This is a latency optimization, not streaming. Call it what it is.
+
+Mechanism: split input text into smaller batches so the FIRST batch completes faster. Each small batch still blocks on its own full generation - it just takes less time because it's shorter.
+
+- `first_package` flag in current `socket_server.py` does exactly this - re-splits first request with smaller `few_chars`/`min_chars` limits
+- Splitting on clause boundaries (6-10 words) is standard
+- Below ~4 words: prosody degrades because F5-TTS conditions on batch's duration prediction
+
+**Realistic impact of text-chunking workaround**: first-audio 620ms → 300-450ms on a single clause.
+
+**Critical**: this is NOT streaming. If first clause is 15 words = 1 batch = still blocks on full render for that batch. Shorter chunks = earlier first audio but at a prosody cost. There is a floor.
+
+### EPSS (Fast-F5-TTS) can further cut this floor
+- arXiv 2505.19931 - training-free step pruning
+- 4x speedup, NFE=7 at parity with NFE=16 quality
+- First-clause render 620ms → ~350ms potentially
+- Still NOT streaming - just faster generation per batch
+- Unverified for Bangla phonotactics
+
+---
+
+## PATH A vs PATH B: pick your trade-off
+
+**These are real alternatives, not tweaks.**
+
+### Path A: Keep IndicF5, accept NO streaming (text-chunking + workarounds)
+
+| Lever | Impact |
+|---|---|
+| Brain P-state fix | -400ms (cold-start eliminated) |
+| `first_package` text-chunking | first clause 620ms → 300-450ms |
+| EPSS step pruning | first clause 450ms → 200-300ms |
+| Pre-synth filler audio | hides 500-700ms wait with cached "একটু দেখি..." type lines |
+| Total projected first-sound | **~900-1,100ms** |
+
+**Wins:**
+- Keep your fine-tuned Bangladeshi IndicF5 voice ✅
+- No model retraining ✅
+- No new infrastructure ✅
+- Target 1,500ms hit with wide margin
+
+**Loses:**
+- Will always have a per-batch render floor
+- Cannot do true streaming no matter how much you optimize
+- For callers who talk in short sentences, text-chunking has less effect
+
+### Path B: Switch to streaming TTS (BnTTS / XTTS v2)
+
+**BnTTS** = XTTS v2 continued-pretrain on 3.85k hr Bengali
+- This is **literally what Verbex uses** in production
+- Paper: arXiv 2502.05729
+- Weights NOT publicly released (Hishab's moat) - but you can replicate the approach
+
+**XTTS v2** (base) - Coqui, publicly available
+- Actual sub-generation streaming via `inference_stream()` - yields audio WHILE generating
+- First audio TTFB: **~200ms** (true streaming, not chunked workaround)
+- Voice clone from ~6s reference clip
+- License: MPL + CPML (research + non-commercial for base; need Coqui license for commercial)
+
+**Wins:**
+- True streaming - audio flows out while model still generating
+- First audio ~200ms TTFB (no floor dependent on text length)
+- Architecture that Verbex/competitors use
+- Scales to long responses with no additional first-audio penalty
+
+**Loses:**
+- Lose your IndicF5 voice - must re-establish voice clone on XTTS
+- XTTS voice clone from 6s reference is good but DIFFERENT base model - will sound different
+- If you fine-tuned IndicF5 toward a specific artist, that work is gone
+- XTTS base license CPML blocks commercial use without Coqui license
+- OR replicate BnTTS approach (3.85k hr Bengali continued-pretrain on XTTS) - cost $900-1500 GPU + 3-4 weeks data assembly
+
+### The honest trade-off
+
+```
+IndicF5 + Path A workarounds:  ~300-450ms first audio, YOUR voice
+BnTTS / XTTS streaming:        ~200ms first audio, DIFFERENT voice (clone-able but different base)
 ```
 
-### Architecture claim check
-**Correct for a single utterance.** When `streaming=True`:
-- Iterates text batches sequentially
-- Yields fixed-size slices
-- **BUT each batch's FULL generation completes before any audio yields**
-- Chunks arrive at batch boundaries, NOT during model sampling
-- Flow matching inherently produces whole waveform per NFE pass - can't peek mid-ODE
+### Which path?
 
-So for a single 3-word clause = single batch = still blocks on full render. Their team's architectural conclusion stands.
+**If voice ownership matters most** (your whole project exists to own the voice):
+→ **Path A**. Brain P-state fix + first_package + EPSS + fillers = well under 1500ms target.
 
-### The fix they haven't adopted: `first_package` flag
-Current `socket_server.py` already does this: `first_package` flag re-splits the first request with smaller `few_chars` / `min_chars` limits so first audio lands fast, then normal chunking takes over.
+**If latency matters most** (sub-1,000ms perceived response, matching commercial vendors):
+→ **Path B**. BnTTS replication is $900-1500 one-time cost + 3-4 weeks.
 
-Splitting on clause boundaries (6-10 words) is standard. Below ~4 words prosody degrades because F5-TTS conditions on batch's duration prediction.
+**The 400ms P-state fix on brain alone** gets you under 1500ms with current stack. You do NOT need to switch TTS just to hit the target. Switching TTS is for going further - toward Verbex-class 800-1200ms.
 
-**Realistic impact**: first-audio to 300-450ms on a single clause (down from 620-720ms).
+### Clause streaming (Q5): KEEP
 
-### Route they asked about in Q4: pick BOTH
-
-Section 4 (brain idle) + section 6b (TTS first-chunk) are not alternatives - they're additive:
-- Brain fix (P-state): ~400ms savings on cold-start path
-- TTS fix (pip upgrade + first_package): ~250-320ms savings on first-chunk
-
-Total potential: 1914ms → ~1240ms. Well under 1500ms target, with margin for retrieval/tools later.
-
-### Clause streaming (section 6, Q5) - keep it
-
-**Keep it.** Reasons:
-- After brain P-state fix: first clause arrives ~500ms, mouth still 620ms (or 350ms with upgrade + first_package). Overlap exists again.
-- Even without overlap, clause streaming starts speaking the moment brain's first clause is ready. Rendering whole response requires full brain finish = +520-660ms wait.
-- 18-char minimum workaround is correct and widely used.
+Even without TTS sub-generation streaming:
+- After brain P-state fix: first clause ready at ~500ms, mouth 450ms = overlap exists again
+- Without overlap, clause dispatch still starts audio immediately on brain first clause
+- Rendering whole response requires full brain finish = +520-660ms wait
+- 18-char minimum workaround is correct
 
 ### Refinement (optional)
 
@@ -305,35 +373,35 @@ Whatever the runtime, 324ms for a 120M Conformer is suspiciously high (repo auth
 
 ---
 
-## Action order (verified priority, updated after section 6b research)
+## Action order - Path A (keep IndicF5)
 
-### Cheap wins first
-1. **Upgrade `f5_tts` to 1.1.22** (5 min, pip install) - unlocks real streaming support that exists but they're missing
-2. **Enable `first_package` flag in socket_server.py** (code change, 1 hour) - re-splits first request with smaller chunks → **first-audio 620ms → 300-450ms**
-3. **Fix GPU P-states on brain box** (1 hour including systemd setup, zero risk) - **saves ~400ms** on brain idle
+### Cheap wins first (1 day total)
+1. **Fix GPU P-states on brain box** (1 hour including systemd setup, zero risk) - **saves ~400ms** on brain cold-start
+2. **Upgrade `f5_tts` to 1.1.22** (5 min, pip install) - minor fixes, text-chunking primitives
+3. **Implement text-chunking workaround** (code change, 1-2 hours) - split first batch to 6-10 words so first render completes faster → first-audio 620ms → 300-450ms
 4. **Pre-synthesize filler audio cache** (2 hours) - 5-10 fillers once, cached in RAM, play on wait >1.5s
 5. **Clarify ear runtime** - faster-whisper vs NeMo? Then apply correct flags
 
 ### Do NOT
 - **Do NOT drop NFE below 12** (NFE=8 is on degradation cliff per Fast-F5-TTS paper)
-- **Do NOT swap TTS away from IndicF5** until steps 1-4 proven insufficient
-- **Do NOT switch LLM** until P-state fix validated
+- **Do NOT call this "streaming"** - IndicF5 can't stream. It's a text-chunking latency workaround.
+- **Do NOT swap TTS away from IndicF5** unless Path B business case justifies the voice loss
 
 ### Only if target still missed after above
+- Try EPSS (Fast-F5-TTS step pruning) for mouth - 620ms → 350ms, still not streaming but faster per batch
 - Try Qwen2.5-14B-Instruct Q4 for brain
-- Try EPSS (Fast-F5-TTS step pruning) for mouth - can drop render time 620ms → 350ms
-- Last resort: swap IndicF5 for BnTTS (XTTS-v2 Bengali continued-pretrain)
+- Swap to Path B (BnTTS/XTTS) if latency matters more than voice ownership
 
-### Projected total after steps 1-4
+### Projected totals
 
-| Stage | Current | After fix | How |
+| Path | TTS | Total first-sound | Voice |
 |---|---|---|---|
-| Ear | 324ms | ~250ms | Ear flags |
-| Brain | 878ms (median mix) | ~500ms | P-state fix |
-| Mouth (first clause) | 670ms | 350-450ms | pip upgrade + first_package |
-| **Total first-sound** | **1,914ms** | **~1,100-1,200ms** | **well under 1,500ms target** |
+| Current | IndicF5 NFE=12 (no workarounds) | 1,914ms | IndicF5 ✓ |
+| Path A (P-state + text-chunk + filler) | IndicF5 + workarounds | **~1,100-1,200ms** | IndicF5 ✓ |
+| Path A + EPSS | IndicF5 + EPSS | **~900-1,000ms** | IndicF5 ✓ |
+| Path B (full switch) | BnTTS / XTTS streaming | **~800ms** | DIFFERENT (clone-able) ✗ |
 
-Zero architecture change needed. Target achievable in 1 day of work.
+Path A hits 1,500ms target comfortably. Path B goes further but at voice cost.
 
 ---
 
