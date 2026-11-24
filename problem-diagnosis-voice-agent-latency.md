@@ -147,9 +147,53 @@ Benchmark both on YOUR Bangla banking scripts - published scores don't capture b
 
 ---
 
-## Q3 (clause streaming architecture right?)
+## Q3 UPDATED (section 6b: can F5-TTS reduce TTFA?)
 
-Yes, right approach. Their 18-char minimum workaround is correct and widely used.
+**Their team is RIGHT on architecture, WRONG on version.**
+
+### Version claim check
+- They cite `f5_tts 0.1.0` - **this version does NOT exist on PyPI**
+- Earliest PyPI release: `0.3.4` (Jan 2025)
+- Latest PyPI: `1.1.22` (Jul 2026)
+- Their quoted `socket_server.py` code matches a **pre-Feb-2025 snapshot**, not current
+- Streaming support shipped in **PyPI 0.6.2 (2025-02-26)** and solid in **1.0.0 (2025-03-12)**
+
+**Fix**: upgrade `f5_tts` to 1.1.22. Current signature:
+```python
+def infer_batch_process(..., streaming=False, chunk_size=2048, ...)
+```
+
+### Architecture claim check
+**Correct for a single utterance.** When `streaming=True`:
+- Iterates text batches sequentially
+- Yields fixed-size slices
+- **BUT each batch's FULL generation completes before any audio yields**
+- Chunks arrive at batch boundaries, NOT during model sampling
+- Flow matching inherently produces whole waveform per NFE pass - can't peek mid-ODE
+
+So for a single 3-word clause = single batch = still blocks on full render. Their team's architectural conclusion stands.
+
+### The fix they haven't adopted: `first_package` flag
+Current `socket_server.py` already does this: `first_package` flag re-splits the first request with smaller `few_chars` / `min_chars` limits so first audio lands fast, then normal chunking takes over.
+
+Splitting on clause boundaries (6-10 words) is standard. Below ~4 words prosody degrades because F5-TTS conditions on batch's duration prediction.
+
+**Realistic impact**: first-audio to 300-450ms on a single clause (down from 620-720ms).
+
+### Route they asked about in Q4: pick BOTH
+
+Section 4 (brain idle) + section 6b (TTS first-chunk) are not alternatives - they're additive:
+- Brain fix (P-state): ~400ms savings on cold-start path
+- TTS fix (pip upgrade + first_package): ~250-320ms savings on first-chunk
+
+Total potential: 1914ms → ~1240ms. Well under 1500ms target, with margin for retrieval/tools later.
+
+### Clause streaming (section 6, Q5) - keep it
+
+**Keep it.** Reasons:
+- After brain P-state fix: first clause arrives ~500ms, mouth still 620ms (or 350ms with upgrade + first_package). Overlap exists again.
+- Even without overlap, clause streaming starts speaking the moment brain's first clause is ready. Rendering whole response requires full brain finish = +520-660ms wait.
+- 18-char minimum workaround is correct and widely used.
 
 ### Refinement (optional)
 
@@ -166,6 +210,48 @@ This is the "watermark buffering" pattern used in commercial streaming. 18-char 
 ### What's standard
 
 Verbex, Retell, ElevenLabs Flash, Deepgram Aura all do sentence/clause-level streaming. The "render whole answer first" approach is the old pattern - adds 500-1500ms. Their current approach is correct.
+
+---
+
+## Pre-synthesized filler audio pattern (standard, missed by them)
+
+While brain generates, play a short pre-synthesized filler ("একটু দেখি...", "ঠিক আছে...") to hide the 500-700ms rendering time.
+
+**Verified standard pattern** - documented by LiveKit, Agora, Inworld, AWS Builder Center.
+
+### Protocol
+1. Synthesize 5-10 filler phrases ONCE at startup
+2. Cache in RAM as WAV
+3. On LLM wait > ~1.5s, play filler from cache
+4. On real audio arrival, cross-fade or immediately replace
+
+**Critical**: do NOT synthesize fillers live. That defeats the purpose - takes as long as the real response. Pre-cache.
+
+UCF/CUI 2025 study: fillers don't significantly hurt UX. Verbex/Retell/Vapi all ship this.
+
+### Sources
+- [AWS Builder Center: killing dead air](https://builder.aws.com/content/3KREFKYYAEJuEwaL5XiDMgG1ann/killing-dead-air-how-we-made-a-phone-agent-sound-like-it-is-listening)
+- [LiveKit Agents audio customization](https://docs.livekit.io/agents/multimodality/audio/customization/)
+- [Agora filler words docs](https://docs.agora.io/en/ai/build/shape-the-conversation/filler-words.md)
+
+---
+
+## If they want to switch TTS entirely (the escape hatch)
+
+If F5-TTS pipeline hits ceiling even after upgrade + first_package + EPSS, the escape is autoregressive TTS that streams sub-generation.
+
+| Model | Streams sub-gen? | Clone ref | Bangla |
+|---|---|---|---|
+| **BnTTS** (XTTS-v2 continued-pretrained on 3.85k hr Bengali) | Yes via `inference_stream()` ~200ms TTFB | ~6s | **Purpose-built for exactly this gap** - paper arXiv 2502.05729 |
+| XTTS v2 (vanilla) | Yes ~200ms TTFB | ~6s | OK, weaker than BnTTS |
+| Orpheus | Yes ~180-200ms TTFB, ~100ms with input streaming | ≥5s | Not evaluated, LLaMA-backbone tokenizer unlikely to cover Bangla well |
+| GPT-SoVITS v2 | Yes via `stream_mode` | 5s | No native Bangla, needs fine-tune |
+| StyleTTS2 | **NO** (streaming is TODO) | yes | No |
+| Fish Speech 1.5 | Yes (autoregressive) | yes | Weak |
+
+**Best Bangla-preserving swap: BnTTS** - purpose-built for exactly this gap, inherits XTTS streaming infrastructure.
+
+**But don't swap yet.** Steps 1-3 below should hit target without this.
 
 ---
 
@@ -219,14 +305,35 @@ Whatever the runtime, 324ms for a 120M Conformer is suspiciously high (repo auth
 
 ---
 
-## Action order (verified priority)
+## Action order (verified priority, updated after section 6b research)
 
-1. **Fix GPU P-states on brain box** (1 hour total including systemd setup, zero risk) — saves ~400ms
-2. **Clarify ear runtime** - is it actually faster-whisper or NeMo? Then apply correct flags
-3. **Do NOT touch NFE on mouth** - keep NFE=12
-4. **Only if target still missed**: try Qwen2.5-14B-Instruct Q4 for brain, EPSS for mouth
+### Cheap wins first
+1. **Upgrade `f5_tts` to 1.1.22** (5 min, pip install) - unlocks real streaming support that exists but they're missing
+2. **Enable `first_package` flag in socket_server.py** (code change, 1 hour) - re-splits first request with smaller chunks → **first-audio 620ms → 300-450ms**
+3. **Fix GPU P-states on brain box** (1 hour including systemd setup, zero risk) - **saves ~400ms** on brain idle
+4. **Pre-synthesize filler audio cache** (2 hours) - 5-10 fillers once, cached in RAM, play on wait >1.5s
+5. **Clarify ear runtime** - faster-whisper vs NeMo? Then apply correct flags
 
-Zero architecture change needed. Target achievable by Tuesday.
+### Do NOT
+- **Do NOT drop NFE below 12** (NFE=8 is on degradation cliff per Fast-F5-TTS paper)
+- **Do NOT swap TTS away from IndicF5** until steps 1-4 proven insufficient
+- **Do NOT switch LLM** until P-state fix validated
+
+### Only if target still missed after above
+- Try Qwen2.5-14B-Instruct Q4 for brain
+- Try EPSS (Fast-F5-TTS step pruning) for mouth - can drop render time 620ms → 350ms
+- Last resort: swap IndicF5 for BnTTS (XTTS-v2 Bengali continued-pretrain)
+
+### Projected total after steps 1-4
+
+| Stage | Current | After fix | How |
+|---|---|---|---|
+| Ear | 324ms | ~250ms | Ear flags |
+| Brain | 878ms (median mix) | ~500ms | P-state fix |
+| Mouth (first clause) | 670ms | 350-450ms | pip upgrade + first_package |
+| **Total first-sound** | **1,914ms** | **~1,100-1,200ms** | **well under 1,500ms target** |
+
+Zero architecture change needed. Target achievable in 1 day of work.
 
 ---
 
