@@ -13,6 +13,7 @@ Source project: `bdvoice-stt-tts-master` (Downloads folder).
 - [fine-tuning.md](fine-tuning.md) - **VERIFIED only** - F5-TTS + Conformer fine-tune, latency impact, cost
 - [olares-tts-stt.md](olares-tts-stt.md) - Olares fine-tune / run capability
 - [verbex-voice-agent-architecture.md](verbex-voice-agent-architecture.md) - Verbex full stack: brain/ear/mouth coordination, state machine, tool calling, flow agent nodes. Reverse-engineered Oct-Nov 2026.
+- [livekit-benefits.md](livekit-benefits.md) - Why Verbex/Retell/Vapi/Pipecat all use LiveKit, what we lose by not using it, migration path, trade-offs
 
 ## Verification policy
 
