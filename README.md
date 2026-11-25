@@ -15,6 +15,7 @@ Source project: `bdvoice-stt-tts-master` (Downloads folder).
 - [verbex-voice-agent-architecture.md](verbex-voice-agent-architecture.md) - Verbex full stack: brain/ear/mouth coordination, state machine, tool calling, flow agent nodes. Reverse-engineered Oct-Nov 2026.
 - [livekit-benefits.md](livekit-benefits.md) - Why Verbex/Retell/Vapi/Pipecat all use LiveKit, what we lose by not using it, migration path, trade-offs
 - [problem-diagnosis-voice-agent-latency.md](problem-diagnosis-voice-agent-latency.md) - Response to sibling team's 1,914ms latency problem. Root cause: GPU P-state downclocking. Verified fix saves ~400ms. Also corrects earlier NFE advice.
+- [verbex-vs-our-stack-full-gap.md](verbex-vs-our-stack-full-gap.md) - Full feature-by-feature matrix comparison (200+ items across 19 categories). What we have, what Verbex has, where we win, where we lose, timeline + cost to close the gap.
 
 ## Verification policy
 
