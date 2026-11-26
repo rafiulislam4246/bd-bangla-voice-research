@@ -16,6 +16,7 @@ Source project: `bdvoice-stt-tts-master` (Downloads folder).
 - [livekit-benefits.md](livekit-benefits.md) - Why Verbex/Retell/Vapi/Pipecat all use LiveKit, what we lose by not using it, migration path, trade-offs
 - [problem-diagnosis-voice-agent-latency.md](problem-diagnosis-voice-agent-latency.md) - Response to sibling team's 1,914ms latency problem. Root cause: GPU P-state downclocking. Verified fix saves ~400ms. Also corrects earlier NFE advice.
 - [verbex-vs-our-stack-full-gap.md](verbex-vs-our-stack-full-gap.md) - Full feature-by-feature matrix comparison (200+ items across 19 categories). What we have, what Verbex has, where we win, where we lose, timeline + cost to close the gap.
+- [olares-deployment-plan.md](olares-deployment-plan.md) - Zero-fail deployment plan for Olares One (RTX 5090 Mobile 24GB). Qwen2.5-7B Q6 brain + bn-regional-ct2 ear + IndicF5 mouth as 3 separate Olares apps. All Dockerfiles, chart manifests, deploy commands, smoke tests, rollback. Projected first-sound ~650-950ms.
 
 ## Verification policy
 
